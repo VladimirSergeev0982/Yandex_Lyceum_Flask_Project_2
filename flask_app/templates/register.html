@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Регистрация</h1>
+<form action="" method="post" novalidate class="main_form">
+    <div>
+        <div>
+            {{ form.name.label }}<br>
+            {{ form.name(class="form-control") }}<br>
+            {% for error in form.name.errors %}
+            <div class="alert alert-danger" role="alert">{{ error }}</div>
+            {% endfor %}
+        </div>
+        <div>
+            {{ form.email.label }}<br>
+            {{ form.email(class="form-control") }}<br>
+            {% for error in form.email.errors %}
+            <div class="alert alert-danger" role="alert">{{ error }}</div>
+            {% endfor %}
+        </div>
+        <div>
+            {{ form.password.label }}<br>
+            {{ form.password(class="form-control") }}<br>
+            {% for error in form.password.errors %}
+            <div class="alert alert-danger" role="alert">{{ error }}</div>
+            {% endfor %}
+        </div>
+        <div>
+            {{ form.confirm_password.label }}<br>
+            {{ form.confirm_password(class="form-control") }}<br>
+            {% for error in form.confirm_password.errors %}
+            <div class="alert alert-danger" role="alert">{{ error }}</div>
+            {% endfor %}
+        </div>
+        <div>
+            {{ form.about.label }}<span style="color: grey;"> (не обязательно)</span><br>
+            {{ form.about(class="form-control") }}<br>
+            {% for error in form.about.errors %}
+            <div class="alert alert-danger" role="alert">{{ error }}</div>
+            {% endfor %}
+        </div>
+    </div>
+    <div>
+        <input class="btn btn-secondary" type="submit" value="Зарегистрироваться" style="margin-right: 20px;">
+        <a type="button" class="btn btn-light" href="/login">Войти</a>
+    </div>
+</form>
+{% endblock %}

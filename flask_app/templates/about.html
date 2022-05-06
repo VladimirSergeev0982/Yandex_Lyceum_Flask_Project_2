@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>О проекте</h1>
+<div style="margin-top: 50px;">
+    {% for line in lines %}
+    <div>{{line}}</div>
+    {% endfor %}
+    <div style="margin-top: 30px;">
+        <a href="/download/?file=Инструкция по входу и регистрации.docx" type="button" class="btn btn-outline-info">Скачать
+            инструкции</a>
+    </div>
+</div>
+{% endblock %}
