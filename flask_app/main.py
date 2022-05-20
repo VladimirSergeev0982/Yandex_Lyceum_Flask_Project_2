@@ -4,13 +4,9 @@ from wtforms.validators import InputRequired, Email, EqualTo, Length, Optional, 
 import sqlite3
 from hashlib import sha512
 import os
-import math
 from geopy.distance import geodesic
-import folium
-import datetime
 import logging
 
-from scripts.FDataBase import FDataBase
 from config_file import config
 
 from data import db_session
@@ -20,32 +16,10 @@ from data.posts import Post
 
 app = Flask(__name__)  # Создание экземпляра приложения
 app.config['SECRET_KEY'] = config['secret_key']  # Установка параметра 'SECRET_KEY'
-app.config['DATABASE'] = 'db/flsite.db'
-dbase = None
 
 logging.getLogger(__name__)  # Настройка логирования
 logging.basicConfig(filename='Vmeste.log', level=logging.DEBUG,
                     format='%(name)s: %(asctime)s %(levelname)s: %(message)s')
-
-
-def connect_db():
-    conn = sqlite3.connect(app.config['DATABASE'])
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def create_db():
-    db = connect_db()
-    with app.open_resource('scripts/sq_db.sql', mode='r') as f:
-        db.cursor().executescript(f.read())
-    db.commit()
-    db.close()
-
-
-def get_db() -> object:
-    if not hasattr(g, 'link_db'):
-        g.link_db = connect_db()
-    return g.link_db
 
 
 def secure_random_string(length=64):
@@ -321,53 +295,6 @@ class IsFree:
             raise ValidationError(self.message)
 
 
-class CheckLoginAndPassword:
-    def __init__(self):
-        self.login = None
-        self.password = None
-
-    def send_login(self, login):
-        self.login = login
-        if self.password:
-            return self.check()
-
-    def sent_password(self, password):
-        self.password = password
-        if self.password:
-            return self.check()
-
-    def check(self):
-        db_sess = db_session.create_session()
-        if db_sess.query(User).filter(User.email == self.login).first():
-            user = db_sess.query(User).filter(User.email == login).first()
-            unique_salt = user.salt
-            new_hash = Hash(self.password, use_unique_salt=True, unique_salt=unique_salt,
-                            global_salt=config['global_salt'])
-            old_hash = user.password
-            return new_hash == old_hash
-        else:
-            return False
-
-
-check_login_and_password = CheckLoginAndPassword()
-
-
-class SendLoginToCheck:
-    def __call__(self, form, field):
-        check_login_and_password.send_login(field.data)
-
-
-class SendPasswordToCheck:
-    def __init__(self, message=None):
-        if not message:
-            message = 'Неверный логин или пароль'
-        self.message = message
-
-    def __call__(self, form, field):
-        if not check_login_and_password.sent_password(field.data):
-            raise ValidationError(self.message)
-
-
 class LoginForm(Form):
     """Форма для входа"""
     email = StringField('Email', [InputRequired(message='Введите email')])
@@ -418,20 +345,6 @@ def get_delete_account_form():
     return DeleteAccountForm(request.form)
 
 
-def get_profile_form(user):
-    class ProfileForm(Form):
-        csrf_token = HiddenField(default=get_csrf_token(session.get('session_id', None)))
-        name = StringField('Полное имя', [InputRequired(message='Введите имя'),
-                                          Length(min=3, max=1000, message='Имя слишком короткое')], default=user.name)
-        email = StringField('Email', [InputRequired(message='Введите email'),
-                                      Email(message='Неверный email', check_deliverability=False),
-                                      IsFree(validation_exception=user.email)], default=user.email)
-        about = TextAreaField('О себе', [Optional(), Length(max=10000)], default=user.about)
-        submit = SubmitField()
-
-    return ProfileForm(request.form)
-
-
 def get_edit_profile_form(user):
     """Возвращает экземпляр класса 'EditProfileForm'"""
 
@@ -452,31 +365,6 @@ def get_edit_profile_form(user):
     return EditProfileForm(request.form)
 
 
-@app.before_request
-def before_request():
-    global dbase
-    db = get_db()
-    dbase = FDataBase(db)
-
-
-@app.teardown_appcontext
-def close_db(error):
-    if hasattr(g, 'link_db'):
-        g.link_db.close()
-
-
-@app.route('/map2')
-def map2():
-    Fmap = folium.Map(location=[69.11677, 47.26278])
-    return Fmap._repr_html_()
-
-
-@app.route("/get_my_ip", methods=["GET"])
-def get_my_ip():
-    return str(request.remote_addr)
-
-
-@app.route('/yandex_map_test', methods=["GET"])
 @app.route('/map', methods=["GET"])
 def show_map():  # TODO
     """Страница с картой"""
@@ -561,11 +449,6 @@ def show_post():  # TODO
     return render_template('post.html', **param)
 
 
-@app.route('/create_error')
-def create_error():
-    return str(1 / 0)
-
-
 @app.route('/')
 @app.route('/index')
 def index():  # TODO
@@ -576,32 +459,6 @@ def index():  # TODO
         'session': user_session.check_session()
     }
     return render_template('bung.html', **param)
-
-
-@app.route('/profile', methods=['POST', 'GET'])
-def profile():
-    user_session = UserSession()
-    if user_session.check_session():
-        form = get_profile_form(user_session.get_user())
-        if request.method == 'POST' and form.validate():
-            session_id = session.get('session_id', None)
-            if form.csrf_token.data != get_csrf_token(session_id):
-                return redirect('/profile')
-            db_sess = db_session.create_session()
-            user = db_sess.query(User).filter(User.id == user_session.get_user_id()).first()
-            user.name = form.name.data
-            # user.email = form.email.data
-            user.about = form.about.data
-            db_sess.commit()
-            update_csrf_token(session_id)
-        param = {
-            'title': 'Мой профиль',
-            'session': user_session.check_session(),
-            'user': user_session.get_user()
-        }
-        return render_template('profile.html', form=form, **param)
-    else:
-        return redirect('/login')
 
 
 @app.route('/my_profile')
@@ -705,66 +562,6 @@ def show_user():
         return render_template('user.html', **param)
     else:
         abort(404)
-
-
-@app.route('/open-street-map')
-def open_street_map():
-    Fmap = folium.Map(location=[56.11677, 47.26278],
-                      tiles='Stamen Toner',
-                      zoom_start=13
-                      )
-    return Fmap._repr_html_()
-
-
-@app.route('/map-marker')
-def map_marker():
-    Fmap = folium.Map(location=[56.11677, 47.26278],
-                      tiles='Stamen Terrain',
-                      zoom_start=13
-                      )
-    folium.Marker(location=[56.13677, 47.24278],
-                  popup='<b> <a href="/open-street-map"> Новости Ленинского района </a> </b>',
-                  tooltip='Ленинский район',
-                  icon=folium.Icon(color='blue')
-                  ).add_to(Fmap)
-
-    folium.Marker(location=[56.13677, 47.30278],
-                  popup='<b> <a href="/open-street-map"> Новости Калининкого района </a> </b>',
-                  tooltip='Калининский район',
-                  icon=folium.Icon(color='green')
-                  ).add_to(Fmap)
-
-    folium.Marker(location=[56.14677, 47.22278],
-                  popup='<b> <a href="/open-street-map"> Новости Московского района </a> </b>',
-                  tooltip='Московский район',
-                  icon=folium.Icon(color='red')
-                  ).add_to(Fmap)
-
-    return Fmap._repr_html_()
-
-
-@app.route("/add_post", methods=["POST", "GET"])
-def add_post():
-    if request.method == "POST":
-        if len(request.form['name']) > 20 and len(request.form['post']) > 40:
-            res = dbase.addPost(request.form['name'], request.form['post'], request.form['url'])
-            if not res:
-                flash('Ошибка добавления статьи', category='error')
-            else:
-                flash('Статья добавлена успешно', category='success')
-        else:
-            flash('Ошибка добавления статьи', category='error')
-
-    return render_template('add_post.html', menu=dbase.getMenu(), title="Добавление статьи")
-
-
-@app.route("/post2/<alias>")
-def show_post_2(alias):
-    title, post = dbase.getPost(alias)
-    if not title:
-        abort(404)
-
-    return render_template('post2.html', menu=dbase.getMenu(), title=title, post=post)
 
 
 @app.route('/login', methods=['POST', 'GET'])
