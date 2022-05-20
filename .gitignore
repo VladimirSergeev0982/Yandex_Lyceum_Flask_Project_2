@@ -1,3 +1,10 @@
 /Pipfile
 /Ссылка.txt
 /venv/
+/temp (не удалять)/
+/email.txt
+/Vmeste.log
+/flask_app/db/VMeste.db
+/flask_app/javascript/test.js
+/flask_app/templates/test.html
+/flask_app/test.py

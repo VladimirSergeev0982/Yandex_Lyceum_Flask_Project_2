@@ -1,12 +1,14 @@
 from flask import Flask, request, render_template, redirect, abort, send_file, g, session, flash
-from wtforms import Form, StringField, PasswordField, TextAreaField, BooleanField, SubmitField, HiddenField
+from wtforms import Form, StringField, PasswordField, TextAreaField, BooleanField, SelectField, SubmitField, HiddenField
 from wtforms.validators import InputRequired, Email, EqualTo, Length, Optional, ValidationError
-import werkzeug
 import sqlite3
 from hashlib import sha512
-from os import urandom
 import os
+import math
+from geopy.distance import geodesic
 import folium
+import datetime
+import logging
 
 from scripts.FDataBase import FDataBase
 from config_file import config
@@ -14,11 +16,16 @@ from config_file import config
 from data import db_session
 from data.users import User
 from data.sessions import Session
+from data.posts import Post
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = config['secret_key']
+app = Flask(__name__)  # Создание экземпляра приложения
+app.config['SECRET_KEY'] = config['secret_key']  # Установка параметра 'SECRET_KEY'
 app.config['DATABASE'] = 'db/flsite.db'
 dbase = None
+
+logging.getLogger(__name__)  # Настройка логирования
+logging.basicConfig(filename='Vmeste.log', level=logging.DEBUG,
+                    format='%(name)s: %(asctime)s %(levelname)s: %(message)s')
 
 
 def connect_db():
@@ -41,25 +48,104 @@ def get_db() -> object:
     return g.link_db
 
 
-@app.before_request
-def before_request():
-    global dbase
-    db = get_db()
-    dbase = FDataBase(db)
-
-
-@app.teardown_appcontext
-def close_db(error):
-    if hasattr(g, 'link_db'):
-        g.link_db.close()
-
-
 def secure_random_string(length=64):
-    return ''.join([hex(b)[2:] for b in urandom(length)])
+    """Создает криптографически надежную случайную строку"""
+    return ''.join([hex(b)[2:] for b in os.urandom(length)])
+
+
+def get_csrf_token(session_id):
+    """Возвращает CSRF токен сессии"""
+    user_session = db_session.create_session().query(Session).filter(Session.id == session_id).first()
+    if user_session:
+        csrf_token = user_session.csrf_token
+        if csrf_token:
+            return csrf_token
+    raise TypeError('Не удалось получить CSRF токен')
+
+
+def update_csrf_token(session_id):
+    """Обновляет CSRF токен сессии"""
+    db_sess = db_session.create_session()
+    if db_sess.query(Session).filter(Session.id == session_id).first():
+        db_sess.query(Session).filter(Session.id == session_id).first().csrf_token = secure_random_string(32)
+        db_sess.commit()
+    else:
+        raise TypeError('Не удалось изменить CSRF токен')
+
+
+def get_posts_near_from_coords(coords, user_id=None):
+    posts = []
+    db_sess = db_session.create_session()
+    for post in db_sess.query(Post):
+        author = db_sess.query(User).filter(User.id == post.author).first()
+        if post.location and geodesic(coords, post.location.split(';')).m <= 400 and (
+                post.access == 'public' or post.author == user_id):
+            posts.append((post, author))
+    posts.sort(key=lambda x: x[0].created_date)
+    posts.reverse()
+    return posts
+
+
+def check_authorization_data(user_login=None, user_id=None, password=None):
+    """Валидатор формы, проверяет логин и пароль, или id и пароль"""
+    if not password:
+        return []
+    db_sess = db_session.create_session()
+    if user_login:
+        user = db_sess.query(User).filter(User.email == user_login).first()
+    else:
+        user = db_sess.query(User).filter(User.id == user_id).first()
+    if user:
+        unique_salt = user.salt
+        new_hash = Hash(password, use_unique_salt=True, unique_salt=unique_salt,
+                        global_salt=config['global_salt'])
+        old_hash = user.password
+        if new_hash == old_hash:
+            return []
+    return [(ValidationError('Неверный логин или пароль'), 'wrong_password')]
+
+
+def check_data_for_password_changing(old_password, new_password, confirm_new_password):
+    """Валидатор формы, проверяет данные для смены пароля"""
+    validation_errors = []
+    if old_password or new_password or confirm_new_password:
+        if not old_password:
+            validation_errors.append(
+                (ValidationError('Для смены пароля введите старый пароль'), 'old_password_not_filled'))
+        if not new_password:
+            validation_errors.append(
+                (ValidationError('Для смены пароля введите новый пароль'), 'new_password_not_filled'))
+        if not confirm_new_password:
+            validation_errors.append((ValidationError('Для смены пароля подтвердите новый пароль'),
+                                      'confirm_new_password_not_filled'))
+    return validation_errors
+
+
+def password_security_check(password):
+    """Валидатор формы, проверяет надежность пароля"""
+    if len(password) > 0:
+        if len(password) < 8:
+            return [(ValidationError('Пароль должен содержать не менее 8 символов'), 'password_is_too_easy')]
+        if password.isalpha():
+            return [(ValidationError('Пароль не может состоять только из букв'), 'password_is_too_easy')]
+        if password.isdigit():
+            return [(ValidationError('Пароль не может состоять только из цифр'), 'password_is_too_easy')]
+        if password.islower():
+            return [(ValidationError('Все буквы пароля не могут быть в нижнем регистре'), 'password_is_too_easy')]
+        if password.isupper():
+            return [(ValidationError('Все буквы пароля не могут быть в верхнем регистре'), 'password_is_too_easy')]
+    return []
 
 
 class Hash:
+    """Класс хэша"""
+
     def __init__(self, string, use_unique_salt=False, unique_salt=None, global_salt=None):
+        """Создание хэша. Параметры:
+        string - хэшируемая строка (обязательный параметр);
+        use_unique_salt - укажите значение 'True', если нужно добавить к хэшируемой строке соль;
+        unique_salt - укажите соль, если нужно использовать вашу соль, иначе случайная соль будет создана автоматически;
+        global_salt - укажите глобальную соль, если нужно добавить ее к строке."""
         self.use_unique_salt = use_unique_salt
         self.unique_salt = unique_salt
         if self.use_unique_salt:
@@ -73,82 +159,101 @@ class Hash:
             str(string).encode('utf-8') + self.unique_salt.encode('utf-8') + global_salt.encode('utf-8')).hexdigest()
 
     def hash(self):
+        """Возвращает хэш"""
         return self.hash_sha512
 
     def __str__(self):
+        """Возвращает хэш"""
         return self.hash()
 
     def salt(self):
+        """Возвращает уникальную соль, если она существует, иначе 'None'"""
         if self.use_unique_salt:
             return self.unique_salt
         else:
             return None
 
     def __eq__(self, other):
+        """Метод для сравнения хэшей"""
         if isinstance(other, Hash):
             return self.hash_sha512 == other.hash_sha512
         elif isinstance(other, str):
             return self.hash_sha512 == other
         else:
-            try:
-                return self.hash_sha512 == str(other)
-            except Exception:
-                return False
+            return self.hash_sha512 == str(other)
 
     def __ne__(self, other):
+        """Метод для сравнения хэшей"""
         if isinstance(other, Hash):
             return self.hash_sha512 != other.hash_sha512
         elif isinstance(other, str):
             return self.hash_sha512 != other
         else:
-            try:
-                return self.hash_sha512 != str(other)
-            except Exception:
-                return False
+            return self.hash_sha512 != str(other)
 
 
-class User_Session:
-    def __init__(self, user_id=None, user=None):
-        if not user_id and user:
-            user_id = user.id
+class UserSession:
+    """Класс сессии"""
+
+    def __init__(self, user_id=None, user_email=None, user=None):
+        """Создание класса сессии. Параметры:
+        user_id - id пользователя (необязательный параметр);
+        user_email - email пользователя (необязательный параметр);
+        user - тип "<class 'data.users.User'>" (необязательный параметр)."""
+        if user_id:
+            self.user_id = user_id
+        elif user_email:
+            self.user_id = db_session.create_session().query(User).filter(User.email == user_email).first().id
+        elif user:
+            self.user_id = user.id
         self.user_id = user_id
+        self.session_exists = False
 
     def check_session(self):
-        if self.user_id:
+        """Проверяет существование сессии"""
+        if self.session_exists:
             return True
         else:
             key = session.get('session_key', None)
-            user_id = session.get('user_id', None)
-            if key and user_id:
-                db_sess = db_session.create_session()
-                if db_sess.query(Session).filter(Session.user == user_id).first():
-                    unique_salt = db_sess.query(Session).filter(Session.user == user_id).first().salt
-                    new_hash = Hash(key, use_unique_salt=True, unique_salt=unique_salt,
-                                    global_salt=config['global_salt'])
-                    old_hash = db_sess.query(Session).filter(Session.user == user_id).first().key
-                    if new_hash == old_hash:
-                        self.user_id = user_id
-                        return True
+            session_id = session.get('session_id', None)
+            if key and session_id:
+                user_sessions = db_session.create_session().query(Session).filter(Session.id == session_id)
+                if user_sessions:
+                    for user_session in user_sessions:
+                        unique_salt = user_session.salt
+                        new_hash = Hash(key, use_unique_salt=True, unique_salt=unique_salt,
+                                        global_salt=config['global_salt'])
+                        old_hash = user_session.key
+                        if new_hash == old_hash:
+                            self.user_id = user_session.user
+                            self.session_exists = True
+                            return True
             return False
 
     def get_user_id(self):
+        """Возвращает id пользователя (перед использованием необходимо применить к экземпляру класса метод '.check_session()')"""
         return self.user_id
 
     def get_user(self):
+        """Возвращает тип "<class 'data.users.User'>" (перед использованием необходимо применить к экземпляру класса метод '.check_session()')"""
         return db_session.create_session().query(User).filter(User.id == self.user_id).first()
 
     def create_session(self, user_id=None, user_email=None, user=None, remember_user=False):
+        """Создает сессию. Параметры:
+        user_id - id пользователя (необязательный параметр);
+        user_email - логин пользователя (необязательный параметр);
+        user - тип "<class 'data.users.User'>" (необязательный параметр);
+        remember_user - укажите 'True', если нужно сохранить сессию после закрытия браузера (необязательный параметр)."""
+        db_sess = db_session.create_session()
         if not self.user_id:
             if user_id:
                 self.user_id = user_id
             elif user_email:
-                self.user_id = db_session.create_session().query(User).filter(User.email == user_email).first().id
+                self.user_id = db_sess.query(User).filter(User.email == user_email).first().id
             elif user:
                 self.user_id = user.id
             else:
                 raise TypeError('Не найдено id пользователя')
-        db_sess = db_session.create_session()
-        db_sess.query(Session).filter(Session.user == self.user_id).delete()
         user_session = Session()
         user_session.user = self.user_id
         key = secure_random_string()
@@ -157,53 +262,66 @@ class User_Session:
         user_session.salt = key_hash.salt()
         db_sess.add(user_session)
         db_sess.commit()
+        update_csrf_token(user_session.id)
         session['session_key'] = key
-        session['user_id'] = self.user_id
+        session['session_id'] = user_session.id
         session.permanent = remember_user
+        self.session_exists = True
 
-    def delete_session(self, user_id=None, user_email=None, user=None):
-        if not self.user_id:
-            if user_id:
-                self.user_id = user_id
-            elif user_email:
-                self.user_id = db_session.create_session().query(User).filter(User.email == user_email).first().id
-            elif user:
-                self.user_id = user.id
-            else:
-                raise TypeError('Не найдено id пользователя')
-        db_sess = db_session.create_session()
-        db_sess.query(Session).filter(Session.user == self.user_id).delete()
-        db_sess.commit()
-        session.pop('session_key', None)
-        session.pop('user_id', None)
+    def delete_session(self):
+        """Удаляет сессию (перед использованием необходимо применить к экземпляру класса метод '.check_session()')"""
+        if self.session_exists:
+            session_id = session.get('session_id', None)
+            db_sess = db_session.create_session()
+            db_sess.query(Session).filter(Session.id == session_id).delete()
+            db_sess.commit()
+            session.pop('session_key', None)
+            session.pop('session_id', None)
+            self.session_exists = False
+
+    def delete_all_user_sessions(self, user_id=None, user_email=None, user=None):
+        """Удаляет все сессии пользователя
+        (перед использованием необходимо применить к экземпляру класса метод '.check_session()').
+        Параметры:
+        user_id - id пользователя (необязательный параметр);
+        user_email - логин пользователя (необязательный параметр);
+        user - тип "<class 'data.users.User'>" (необязательный параметр).
+        """
+        if self.session_exists:
+            db_sess = db_session.create_session()
+            if not self.user_id:
+                if user_id:
+                    self.user_id = user_id
+                elif user_email:
+                    self.user_id = db_sess.query(User).filter(User.email == user_email).first().id
+                elif user:
+                    self.user_id = user.id
+                else:
+                    raise TypeError('Не найдено id пользователя')
+            db_sess.query(Session).filter(Session.user == self.user_id).delete()
+            db_sess.commit()
+            session.pop('session_key', None)
+            session.pop('session_id', None)
+            self.session_exists = False
 
 
-class Password_security_check:
-    def __call__(self, form, field):
-        if len(field.data) < 8:
-            raise ValidationError('Пароль должен содержать не менее 8 символов')
-        if field.data.isalpha():
-            raise ValidationError('Пароль не может состоять только из букв')
-        if field.data.isdigit():
-            raise ValidationError('Пароль не может состоять только из цифр')
-        if field.data.islower():
-            raise ValidationError('Все буквы пароля не могут быть в нижнем регистре')
-        if field.data.isupper():
-            raise ValidationError('Все буквы пароля не могут быть в верхнем регистре')
+class IsFree:
+    """Валидатор формы, проверяет занят ли логин. Параметры:
+    validation_exception - укажите логин пользователя, если его необходино исключить при проверке (необязательный параметр)."""
 
-
-class Is_free:
-    def __init__(self, message=None):
+    def __init__(self, message=None, validation_exception=None):
+        self.validation_exception = validation_exception
         if not message:
-            message = 'Пользователь с таким email уже зарегистрирован'
+            message = 'Этот email адрес занят'
         self.message = message
 
     def __call__(self, form, field):
-        if db_session.create_session().query(User).filter(User.email == field.data).first():
+        if db_session.create_session().query(User).filter(
+                (User.email == field.data)).first() and field.data != self.validation_exception:
             raise ValidationError(self.message)
 
 
-class Check_login_and_password:
+class CheckLoginAndPassword:
     def __init__(self):
         self.login = None
         self.password = None
@@ -219,27 +337,27 @@ class Check_login_and_password:
             return self.check()
 
     def check(self):
-        if config['security_level'] == '0.1':
-            db_sess = db_session.create_session()
-            if db_sess.query(User).filter(User.email == self.login).first():
-                unique_salt = db_sess.query(User).filter(User.email == self.login).first().salt
-                new_hash = Hash(self.password, use_unique_salt=True, unique_salt=unique_salt,
-                                global_salt=config['global_salt'])
-                old_hash = db_sess.query(User).filter(User.email == self.login).first().password
-                return new_hash == old_hash
-            else:
-                return False
+        db_sess = db_session.create_session()
+        if db_sess.query(User).filter(User.email == self.login).first():
+            user = db_sess.query(User).filter(User.email == login).first()
+            unique_salt = user.salt
+            new_hash = Hash(self.password, use_unique_salt=True, unique_salt=unique_salt,
+                            global_salt=config['global_salt'])
+            old_hash = user.password
+            return new_hash == old_hash
+        else:
+            return False
 
 
-check_login_and_password = Check_login_and_password()
+check_login_and_password = CheckLoginAndPassword()
 
 
-class Send_login_to_check:
+class SendLoginToCheck:
     def __call__(self, form, field):
         check_login_and_password.send_login(field.data)
 
 
-class Send_password_to_check:
+class SendPasswordToCheck:
     def __init__(self, message=None):
         if not message:
             message = 'Неверный логин или пароль'
@@ -251,62 +369,233 @@ class Send_password_to_check:
 
 
 class LoginForm(Form):
-    email = StringField('Email', [InputRequired(message='Введите email'), Send_login_to_check()])
-    password = PasswordField('Пароль', [InputRequired(message='Введите пароль'), Send_password_to_check()])
+    """Форма для входа"""
+    email = StringField('Email', [InputRequired(message='Введите email')])
+    password = PasswordField('Пароль', [InputRequired(message='Введите пароль')])
     remember_user = BooleanField('Запомнить меня')
-    submit = SubmitField('Войти')
+    submit = SubmitField()
 
 
 class RegisterForm(Form):
+    """Форма для регистрации"""
     name = StringField('Полное имя',
                        [InputRequired(message='Введите имя'), Length(min=3, max=1000, message='Имя слишком короткое')])
     email = StringField('Email', [InputRequired(message='Введите email'),
-                                  Email(message='Неверный email', check_deliverability=True), Is_free()])
-    password = PasswordField('Пароль', [InputRequired(message='Введите пароль'), Password_security_check()])
+                                  Email(message='Неверный email', check_deliverability=False),
+                                  IsFree(message='Пользователь с таким email уже зарегистрирован')])
+    password = PasswordField('Пароль', [InputRequired(message='Введите пароль')])
     confirm_password = PasswordField('Подтвердите пароль', [InputRequired(message='Подтвердите пароль'),
                                                             EqualTo('password', message='Пароли должны совпадать')])
     about = TextAreaField('Расскажите о себе', [Optional(), Length(max=10000)])
-    submit = SubmitField('Зарегистрироваться')
+    submit = SubmitField()
 
 
-@app.route('/')  # TODO
+def get_add_post_form():
+    """Возвращает экземпляр класса 'AddPostForm'"""
+
+    class AddPostForm(Form):
+        """Форма для добавления постов"""
+        csrf_token = HiddenField(default=get_csrf_token(session.get('session_id', None)))
+        title = StringField('Заголовок поста', [InputRequired(message='Введите заголовок поста'), Length(max=1000)])
+        content = TextAreaField('Текст поста', [InputRequired(message='Введите текст поста'), Length(max=10000)])
+        access = SelectField('Доступ', choices=[('private', 'Приватный'), ('public', 'Публичный')])
+        submit = SubmitField()
+
+    return AddPostForm(request.form)
+
+
+def get_delete_account_form():
+    """Возвращает экземпляр класса 'DeleteAccountForm'"""
+
+    class DeleteAccountForm(Form):
+        """Форма для удаления аккаунта"""
+        csrf_token = HiddenField(default=get_csrf_token(session.get('session_id', None)))
+        password = PasswordField('Пароль', [InputRequired(message='Введите пароль')])
+        confirm = BooleanField('Я понимаю, что не смогу восстановить аккаунт и согласен с этим.',
+                               [InputRequired(message='Пожалуйста отметьте')])
+        submit = SubmitField()
+
+    return DeleteAccountForm(request.form)
+
+
+def get_profile_form(user):
+    class ProfileForm(Form):
+        csrf_token = HiddenField(default=get_csrf_token(session.get('session_id', None)))
+        name = StringField('Полное имя', [InputRequired(message='Введите имя'),
+                                          Length(min=3, max=1000, message='Имя слишком короткое')], default=user.name)
+        email = StringField('Email', [InputRequired(message='Введите email'),
+                                      Email(message='Неверный email', check_deliverability=False),
+                                      IsFree(validation_exception=user.email)], default=user.email)
+        about = TextAreaField('О себе', [Optional(), Length(max=10000)], default=user.about)
+        submit = SubmitField()
+
+    return ProfileForm(request.form)
+
+
+def get_edit_profile_form(user):
+    """Возвращает экземпляр класса 'EditProfileForm'"""
+
+    class EditProfileForm(Form):
+        """Форма для редактирования профиля"""
+        csrf_token = HiddenField(default=get_csrf_token(session.get('session_id', None)))
+        name = StringField('Полное имя', [Optional(), Length(min=3, max=1000, message='Имя слишком короткое')],
+                           default=user.name)
+        email = StringField('Email', [Optional(), Email(message='Неверный email', check_deliverability=False),
+                                      IsFree(validation_exception=user.email)], default=user.email)
+        about = TextAreaField('О себе', [Optional(), Length(max=10000)], default=user.about)
+        old_password = PasswordField('Старый пароль', [Optional()])
+        new_password = PasswordField('Новый пароль', [Optional()])
+        confirm_new_password = PasswordField('Подтвердите новый пароль',
+                                             [Optional(), EqualTo('new_password', message='Пароли должны совпадать')])
+        submit = SubmitField()
+
+    return EditProfileForm(request.form)
+
+
+@app.before_request
+def before_request():
+    global dbase
+    db = get_db()
+    dbase = FDataBase(db)
+
+
+@app.teardown_appcontext
+def close_db(error):
+    if hasattr(g, 'link_db'):
+        g.link_db.close()
+
+
+@app.route('/map2')
+def map2():
+    Fmap = folium.Map(location=[69.11677, 47.26278])
+    return Fmap._repr_html_()
+
+
+@app.route("/get_my_ip", methods=["GET"])
+def get_my_ip():
+    return str(request.remote_addr)
+
+
+@app.route('/yandex_map_test', methods=["GET"])
+@app.route('/map', methods=["GET"])
+def show_map():  # TODO
+    """Страница с картой"""
+    user_session = UserSession()
+    user_session.check_session()
+    number_of_posts = 0
+    number_of_chats = 0
+    coords = request.args.get("ll")
+    zoom = request.args.get("z")
+    if coords:
+        coords = [float(i) for i in coords.split(',')]
+        map_coords = coords
+        point_coords = coords
+        number_of_posts = len(get_posts_near_from_coords(coords, user_id=user_session.get_user_id()))
+    else:
+        map_coords = [56.14561517712219, 47.244224423534234]
+        point_coords = None
+    if not zoom:
+        zoom = 15
+    param = {
+        'title': 'Карта',
+        'session': user_session.check_session(),
+        'map_coords': map_coords,
+        'point_coords': point_coords,
+        'zoom': zoom,
+        'number_of_posts': number_of_posts,
+        'number_of_chats': number_of_chats
+    }
+    return render_template('map.html', **param)
+
+
+@app.route('/posts', methods=["GET", "POST"])
+def show_posts():  # TODO
+    """Страница с постами"""
+    user_session = UserSession()
+    coords = request.args.get("ll")
+    if coords:
+        form = None
+        if user_session.check_session():
+            form = get_add_post_form()
+        coords = [float(i) for i in coords.split(',')]
+        if request.method == 'POST' and form.validate() and user_session.check_session():
+            session_id = session.get('session_id', None)
+            if form.csrf_token.data != get_csrf_token(session_id):
+                return redirect(f'/posts?ll={",".join([str(i) for i in coords])}')
+            new_post = Post()
+            new_post.title = form.title.data
+            new_post.content = form.content.data
+            new_post.location = ';'.join((str(coords[0]), str(coords[1])))
+            new_post.author = user_session.get_user_id()
+            new_post.access = form.access.data
+            db_sess = db_session.create_session()
+            db_sess.add(new_post)
+            db_sess.commit()
+            update_csrf_token(session_id)
+        posts = get_posts_near_from_coords(coords, user_id=user_session.get_user_id())
+        param = {
+            'title': 'Посты',
+            'session': user_session.check_session(),
+            'session_object': user_session,
+            'posts': posts,
+            'coords': coords
+        }
+        return render_template('posts.html', form=form, **param)
+    abort(404)
+
+
+@app.route('/post', methods=["GET", "POST"])
+def show_post():  # TODO
+    """Страница просмотра отдельного поста"""
+    user_session = UserSession()
+    post_id = request.args.get("id")
+    db_sess = db_session.create_session()
+    post = db_sess.query(Post).filter(Post.id == post_id).first()
+    param = {
+        'title': post.title,
+        'session': user_session.check_session(),
+        'session_object': user_session,
+        'post': post,
+        'autor': db_sess.query(User).filter(User.id == post.author).first().name
+    }
+    return render_template('post.html', **param)
+
+
+@app.route('/create_error')
+def create_error():
+    return str(1 / 0)
+
+
+@app.route('/')
 @app.route('/index')
-def index():
-    abort(501)
+def index():  # TODO
+    """Главная страница"""
+    user_session = UserSession()
+    param = {
+        'title': 'Главная',
+        'session': user_session.check_session()
+    }
+    return render_template('bung.html', **param)
 
 
-@app.route('/profile', methods=['POST', 'GET'])  # TODO
+@app.route('/profile', methods=['POST', 'GET'])
 def profile():
-    user_session = User_Session()
+    user_session = UserSession()
     if user_session.check_session():
-        csrf_token = secure_random_string()
-
-        class EditForm(Form):
-            form_csrf_token = HiddenField(default=csrf_token)
-            name = StringField('Полное имя', [InputRequired(message='Введите имя'),
-                                              Length(min=3, max=1000, message='Имя слишком короткое')],
-                               default=user_session.get_user().name)
-            email = StringField('Email', [InputRequired(message='Введите email'),
-                                          Email(message='Неверный email', check_deliverability=True), Is_free()],
-                                default=user_session.get_user().email)
-            about = TextAreaField('О себе', [Optional(), Length(max=10000)], default=user_session.get_user().about)
-            submit = SubmitField('Сохранить')
-
-        form = EditForm(request.form)
+        form = get_profile_form(user_session.get_user())
         if request.method == 'POST' and form.validate():
-            if form.form_csrf_token.data != csrf_token:
+            session_id = session.get('session_id', None)
+            if form.csrf_token.data != get_csrf_token(session_id):
                 return redirect('/profile')
             db_sess = db_session.create_session()
-            user_id = user_session.get_user_id()
-            if form.name:
-                db_sess.query(User).filter(User.id == user_id).first().name = form.name.data
-            if form.email:
-                db_sess.query(User).filter(User.id == user_id).first().email = form.email.data
-            if form.about:
-                db_sess.query(User).filter(User.id == user_id).first().about = form.about.data
+            user = db_sess.query(User).filter(User.id == user_session.get_user_id()).first()
+            user.name = form.name.data
+            # user.email = form.email.data
+            user.about = form.about.data
             db_sess.commit()
+            update_csrf_token(session_id)
         param = {
-            'page_name': 'Мой профиль',
+            'title': 'Мой профиль',
             'session': user_session.check_session(),
             'user': user_session.get_user()
         }
@@ -315,50 +604,147 @@ def profile():
         return redirect('/login')
 
 
-@app.route('/map')
-def base():
-    map = folium.Map(location=[56.11677, 47.26278])
-    return map._repr_html_()
+@app.route('/my_profile')
+def my_profile():
+    """Если пользователь зарегестрированн, отправляет его на страницу его профиля, иначе на страницу входа"""
+    user_session = UserSession()
+    if user_session.check_session():
+        return redirect(f'/user?id={user_session.get_user_id()}')
+    else:
+        return redirect('/login')
+
+
+@app.route('/edit_profile', methods=['POST', 'GET'])
+def edit_profile():
+    """Страница редактирования профиля"""
+    user_session = UserSession()
+    if user_session.check_session():
+        changes_successfully_applied = False
+        validation_errors = []
+        form = get_edit_profile_form(user_session.get_user())
+        if request.method == 'POST' and form.validate():
+            user_id = user_session.get_user_id()
+            validation_errors += check_data_for_password_changing(old_password=form.old_password.data,
+                                                                  new_password=form.new_password.data,
+                                                                  confirm_new_password=form.confirm_new_password.data)
+            validation_errors += check_authorization_data(user_id=user_id,
+                                                          password=form.old_password.data)
+            validation_errors += password_security_check(form.new_password.data)
+            if not validation_errors:
+                session_id = session.get('session_id', None)
+                if form.csrf_token.data != get_csrf_token(session_id):
+                    return redirect('/edit_profile')
+                db_sess = db_session.create_session()
+                user = db_sess.query(User).filter(User.id == user_id).first()
+                user.name = form.name.data
+                user.email = form.email.data
+                user.about = form.about.data
+                if form.new_password.data:
+                    password_hash = Hash(form.new_password.data, use_unique_salt=True,
+                                         global_salt=config['global_salt'])
+                    user.password = password_hash.hash()
+                    user.salt = password_hash.salt()
+                    user.security_level = config['security_level']
+                db_sess.commit()
+                changes_successfully_applied = True
+                update_csrf_token(session_id)
+        param = {
+            'title': 'Редактирование профиля',
+            'session': user_session.check_session(),
+            'errors': validation_errors,
+            'changes_successfully_applied': changes_successfully_applied
+        }
+        return render_template('edit_profile.html', form=form, **param)
+    else:
+        return redirect('/login')
+
+
+@app.route('/delete_account', methods=['POST', 'GET'])
+def delete_account():
+    """Страница для удаления аккаунта"""
+    user_session = UserSession()
+    if user_session.check_session():
+        validation_errors = []
+        form = get_delete_account_form()
+        if request.method == 'POST' and form.validate():
+            user_id = user_session.get_user_id()
+            validation_errors += check_authorization_data(user_id=user_id, password=form.password.data)
+            if not validation_errors:
+                session_id = session.get('session_id', None)
+                if form.csrf_token.data != get_csrf_token(session_id):
+                    return redirect('/delete_account')
+                db_sess = db_session.create_session()
+                db_sess.query(User).filter(User.id == user_id).delete()
+                db_sess.query(Post).filter(Post.author == user_id).delete()
+                db_sess.commit()
+                user_session.delete_all_user_sessions(user_id=user_id)
+                return redirect('/')
+        param = {
+            'title': 'Удаление аккаунта',
+            'session': user_session.check_session(),
+            'errors': validation_errors
+        }
+        return render_template('delete_account.html', form=form, **param)
+    else:
+        return redirect('/login')
+
+
+@app.route('/user', methods=['GET'])
+def show_user():
+    """Страница просмотра профиля пользователя"""
+    user_session = UserSession()
+    user_id = int(request.args.get("id"))
+    user = db_session.create_session().query(User).filter(User.id == user_id).first()
+    if user:
+        param = {
+            'title': user.name,
+            'session': user_session.check_session(),
+            'user': user,
+            'user_is_account_owner': user_session.get_user_id() == user_id
+        }
+        return render_template('user.html', **param)
+    else:
+        abort(404)
 
 
 @app.route('/open-street-map')
-def open_sreet_map():
-    map = folium.Map(location=[56.11677, 47.26278],
-                     tiles='Stamen Toner',
-                     zoom_start=13
-                     )
-    return map._repr_html_()
+def open_street_map():
+    Fmap = folium.Map(location=[56.11677, 47.26278],
+                      tiles='Stamen Toner',
+                      zoom_start=13
+                      )
+    return Fmap._repr_html_()
 
 
 @app.route('/map-marker')
 def map_marker():
-    map = folium.Map(location=[56.11677, 47.26278],
-                     tiles='Stamen Terrain',
-                     zoom_start=13
-                     )
+    Fmap = folium.Map(location=[56.11677, 47.26278],
+                      tiles='Stamen Terrain',
+                      zoom_start=13
+                      )
     folium.Marker(location=[56.13677, 47.24278],
                   popup='<b> <a href="/open-street-map"> Новости Ленинского района </a> </b>',
                   tooltip='Ленинский район',
                   icon=folium.Icon(color='blue')
-                  ).add_to(map)
+                  ).add_to(Fmap)
 
     folium.Marker(location=[56.13677, 47.30278],
                   popup='<b> <a href="/open-street-map"> Новости Калининкого района </a> </b>',
                   tooltip='Калининский район',
                   icon=folium.Icon(color='green')
-                  ).add_to(map)
+                  ).add_to(Fmap)
 
     folium.Marker(location=[56.14677, 47.22278],
                   popup='<b> <a href="/open-street-map"> Новости Московского района </a> </b>',
                   tooltip='Московский район',
                   icon=folium.Icon(color='red')
-                  ).add_to(map)
+                  ).add_to(Fmap)
 
-    return map._repr_html_()
+    return Fmap._repr_html_()
 
 
 @app.route("/add_post", methods=["POST", "GET"])
-def addPost():
+def add_post():
     if request.method == "POST":
         if len(request.form['name']) > 20 and len(request.form['post']) > 40:
             res = dbase.addPost(request.form['name'], request.form['post'], request.form['url'])
@@ -372,26 +758,31 @@ def addPost():
     return render_template('add_post.html', menu=dbase.getMenu(), title="Добавление статьи")
 
 
-@app.route("/post/<alias>")
-def showPost(alias):
+@app.route("/post2/<alias>")
+def show_post_2(alias):
     title, post = dbase.getPost(alias)
     if not title:
         abort(404)
 
-    return render_template('post.html', menu=dbase.getMenu(), title=title, post=post)
+    return render_template('post2.html', menu=dbase.getMenu(), title=title, post=post)
 
 
 @app.route('/login', methods=['POST', 'GET'])
 def login():
-    user_session = User_Session()
+    """Страница входа"""
+    user_session = UserSession()
     if not user_session.check_session():
+        validation_errors = []
         form = LoginForm(request.form)
         if request.method == 'POST' and form.validate():
-            user_session.create_session(user_email=form.email.data, remember_user=form.remember_user.data)
-            return redirect('/map')
+            validation_errors += check_authorization_data(user_login=form.email.data, password=form.password.data)
+            if not validation_errors:
+                user_session.create_session(user_email=form.email.data, remember_user=form.remember_user.data)
+                return redirect('/map')
         param = {
-            'page_name': 'Вход',
-            'session': user_session.check_session()
+            'title': 'Вход',
+            'session': user_session.check_session(),
+            'errors': validation_errors
         }
         return render_template('login.html', form=form, **param)
     else:
@@ -400,34 +791,40 @@ def login():
 
 @app.route('/register', methods=['POST', 'GET'])
 def register():
-    user_session = User_Session()
+    """Страница регистрации"""
+    user_session = UserSession()
     if not user_session.check_session():
+        validation_errors = []
         form = RegisterForm(request.form)
         if request.method == 'POST' and form.validate():
-            user = User()
-            user.name = form.name.data
-            user.about = form.about.data
-            user.email = form.email.data
-            password_hash = Hash(form.password.data, use_unique_salt=True, global_salt=config['global_salt'])
-            user.password = password_hash.hash()
-            user.salt = password_hash.salt()
-            user.security_level = config['security_level']
-            db_sess = db_session.create_session()
-            db_sess.add(user)
-            db_sess.commit()
-            return redirect('/login')
+            validation_errors += password_security_check(form.password.data)
+            if not validation_errors:
+                user = User()
+                user.name = form.name.data
+                user.about = form.about.data
+                user.email = form.email.data
+                password_hash = Hash(form.password.data, use_unique_salt=True, global_salt=config['global_salt'])
+                user.password = password_hash.hash()
+                user.salt = password_hash.salt()
+                user.security_level = config['security_level']
+                db_sess = db_session.create_session()
+                db_sess.add(user)
+                db_sess.commit()
+                return redirect('/login')
         param = {
-            'page_name': 'Регистрация',
-            'session': user_session.check_session()
+            'title': 'Регистрация',
+            'session': user_session.check_session(),
+            'errors': validation_errors
         }
         return render_template('register.html', form=form, **param)
     else:
-        return redirect("/profile")
+        return redirect("/my_profile")
 
 
 @app.route('/logout')
 def logout():
-    user_session = User_Session()
+    """Осуществляет выход из профиля"""
+    user_session = UserSession()
     if user_session.check_session():
         user_session.delete_session()
     return redirect("/")
@@ -435,10 +832,11 @@ def logout():
 
 @app.route('/about')
 @app.route('/help')
-def about():
-    user_session = User_Session()
+def about():  # TODO
+    """Страница с информацией"""
+    user_session = UserSession()
     param = {
-        'page_name': 'Информация',
+        'title': 'Информация',
         'session': user_session.check_session()
     }
     try:
@@ -449,35 +847,57 @@ def about():
     return render_template('about.html', **param)
 
 
-@app.route('/download/', methods=['GET'])
+@app.route('/download', methods=['GET'])
 def download():
+    """Страница для скачивания файлов"""
     try:
-        return send_file(f'../docs/{request.args.get("file")}')
-    except FileNotFoundError as e:
+        return send_file(f'..docs/{request.args.get("file")}')
+    except OSError as e:
         return str(e)
 
 
-@app.errorhandler(werkzeug.exceptions.NotFound)
-def NotFound(e):
-    user_session = User_Session()
+@app.route('/change_password')
+def change_password():
+    user_session = UserSession()
+    if user_session:
+        return redirect('/edit_profile')
+    else:
+        return redirect('/login')
+
+
+@app.route('/invalid_csrf_token')
+def invalid_csrf_token():
+    user_session = UserSession()
     param = {
-        'page_name': 'Не найдено',
+        'title': 'Недопустимый CSRF токен',
+        'session': user_session.check_session()
+    }
+    return render_template('InvalidCSRFToken.html', **param)
+
+
+@app.errorhandler(404)
+def not_found(e):
+    """Страница с ошибкой 404"""
+    user_session = UserSession()
+    param = {
+        'title': 'Не найдено',
         'session': user_session.check_session()
     }
     return render_template('NotFound.html', **param)
 
 
-@app.errorhandler(werkzeug.exceptions.NotImplemented)
-def NotImplemented(e):
-    user_session = User_Session()
+@app.errorhandler(500)
+def internal_server_error(e):
+    """Страница с ошибкой 500"""
+    user_session = UserSession()
     param = {
-        'page_name': 'Не реализовано',
+        'title': 'Ошибка',
         'session': user_session.check_session()
     }
-    return render_template('NotImplemented.html', **param)
+    return render_template('InternalServerError.html', **param)
 
 
 if __name__ == '__main__':
-    db_session.global_init("db/VMeste.db")
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    db_session.global_init("db/VMeste.db")  # Вызов глобальной инициализации всего, что связано с базой данных
+    port = int(os.environ.get("PORT", 5000))  # Получение порта
+    app.run(host='0.0.0.0', port=port, debug=False)  # Запуск приложения

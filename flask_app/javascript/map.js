@@ -1,11 +1,3 @@
-{% extends "base.html" %}
-
-
-{% block head %}
-<script src="https://api-maps.yandex.ru/2.1/?apikey=40d1649f-0493-4b70-98ba-98533de7710b&lang=ru_RU"
-        type="text/javascript">
-</script>
-<script type="text/javascript">
     ymaps.ready(init);
     function init(){
         var myMap = new ymaps.Map("map", {
@@ -40,10 +32,3 @@
                 document.location.href = link;
             });
         }
-</script>
-{% endblock %}
-{% block content %}
-<main role="main" class="container" style="margin-top: 30px;">
-    <div id="map" style="width: device-width; height: 600px;"></div>
-</main>
-{% endblock %}

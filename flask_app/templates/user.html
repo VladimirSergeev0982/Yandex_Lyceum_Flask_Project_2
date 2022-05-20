@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block content %}
+<main role="main" class="container" style="margin-top: 50px; margin-bottom: 100px;">
+    <div>
+        {% if user_is_account_owner %}
+        <h1 style="margin-bottom: 50px;">Ваш профиль</h1>
+        {% endif %}
+        <div class="card" style="width: 350px;">
+            <img src="/static/img/test.png" alt="Фото пользователя" class="card-img-top">
+            <div class="card-body">
+                {% if user_is_account_owner %}
+                <h5 class="card-title">{{ user.name }}</h5>
+                <h6 class="card-subtitle mb-2 text-muted">{{ user.email }}</h6>
+                <p class="card-text">{{ user.about }}</p>
+                {% else %}
+                <h5 class="card-title">{{ user.name }}</h5>
+                <h6 class="card-subtitle mb-2 text-muted">{{ user.email }}</h6>
+                <p class="card-text">{{ user.about }}</p>
+                {% endif %}
+            </div>
+            {% if user_is_account_owner %}
+            <div class="card-footer text-muted">
+                id: {{ user.id }}<br>Дата регистрации: {{ user.created_date.strftime("%Y/%m/%d %H:%M:%S") }}
+            </div>
+            {% endif %}
+        </div>
+        {% if user_is_account_owner %}
+        <div>
+            <a type="button" class="btn btn-secondary btn-lg" href="/edit_profile"
+               style="margin-top: 50px;">Редактировать</a><br>
+        </div>
+        {% endif %}
+    </div>
+</main>
+{% endblock %}

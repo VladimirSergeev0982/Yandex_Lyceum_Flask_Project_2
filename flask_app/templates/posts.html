@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+
+{% block head %}
+{% endblock %}
+
+{% block content %}
+<main role="main" class="container" style="margin-top: 50px; margin-bottom: 100px;">
+    <h1 align="center">Вы здесь:&ensp;<a href="/map?ll={{ coords[0] }},{{ coords[1] }}">{{ coords[0] }}, {{ coords[1]
+        }}</a></h1>
+    <div style="width: device-width; height: auto; border: 30px solid #909090; margin:auto; background: #909090; margin-top: 50px;">
+        <p>
+            <a class="btn btn-primary btn-lg" data-bs-toggle="collapse" href="#addPost" role="button"
+               aria-expanded="false" aria-controls="addPost">
+                Добавить пост
+            </a>
+        </p>
+        {% if form.errors %}
+        <div class="alert alert-danger" role="alert">Не удалось добавить пост</div>
+        {% endif %}
+        <div class="collapse" id="addPost" style="margin-bottom: 50px;">
+            <div class="card card-body">
+                {% if session %}
+                <form action="" method="post" novalidate>
+                    <div>
+                        {{ form.csrf_token }}
+                    </div>
+                    <div>
+                        <div>
+                            {{ form.title.label }}<br>
+                            {{ form.title(class="form-control") }}<br>
+                            {% for error in form.title.errors %}
+                            <div class="alert alert-danger" role="alert">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div>
+                            {{ form.content.label }}<br>
+                            {{ form.content(class="form-control") }}<br>
+                            {% for error in form.content.errors %}
+                            <div class="alert alert-danger" role="alert">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div>
+                            {{ form.access.label }}<br>
+                            {{ form.access(class="form-control") }}<br>
+                            {% for error in form.access.errors %}
+                            <div class="alert alert-danger" role="alert">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div>
+                        <input class="btn btn-secondary" type="submit" value="Опубликовать" style="margin-right: 20px;">
+                    </div>
+                </form>
+                {% else %}
+                <p>Вам нужно&nbsp;<a href="/login">войти</a>&nbsp;в ваш аккаунт для добавления постов</p>
+                {% endif %}
+            </div>
+        </div>
+        {% for post in posts %}
+        <div class="card card-body">
+            <div>
+                <h5>{{ post[0].title }}</h5>
+                <h6 style="color:#848484;"><a href="/user?id={{ post[1].id }}" class="link-dark">{{ post[1].name }}</a>
+                </h6>
+                <hr size="6">
+                {% if post[0].content[1000:] %}
+                <div style="margin-left: 20px;"><p>{{ post[0].content[:1000] }}...<br><a
+                        href="/post?id={{ post[0].id }}">Подробнее</a></p></div>
+                {% else %}
+                <div style="margin-left: 20px;"><p>{{ post[0].content }}</p></div>
+                {% endif %}
+                <p class="card-text"><small class="text-muted">
+                    {{ post[0].created_date.strftime("%Y/%m/%d %H:%M:%S") }}<br>
+                    {% if session_object.get_user_id() == post[0].author %}
+                    <a href="/post?id={{ post[0].id }}&action=delete">Удалить</a>
+                    {% endif %}
+                </small></p>
+            </div>
+        </div>
+        <br>
+        {% endfor %}
+    </div>
+</main>
+{% endblock %}
