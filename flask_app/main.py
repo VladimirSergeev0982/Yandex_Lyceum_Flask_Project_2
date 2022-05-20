@@ -1,7 +1,6 @@
-from flask import Flask, request, render_template, redirect, abort, send_file, g, session, flash
+from flask import Flask, request, render_template, redirect, session, abort, send_file
 from wtforms import Form, StringField, PasswordField, TextAreaField, BooleanField, SelectField, SubmitField, HiddenField
 from wtforms.validators import InputRequired, Email, EqualTo, Length, Optional, ValidationError
-import sqlite3
 from hashlib import sha512
 import os
 from geopy.distance import geodesic
@@ -695,6 +694,8 @@ def internal_server_error(e):
 
 
 if __name__ == '__main__':
+    if not os.path.isdir("db"):
+        os.mkdir("db")
     db_session.global_init("db/VMeste.db")  # Вызов глобальной инициализации всего, что связано с базой данных
     port = int(os.environ.get("PORT", 5000))  # Получение порта
     app.run(host='0.0.0.0', port=port, debug=False)  # Запуск приложения
